@@ -85,3 +85,61 @@ actualiza la entidad a mano.
 - Migraciones, límites de peticiones y limpieza de archivos subidos huérfanos.
 - Las pruebas corren el código con el transformador de Vitest, no con el build de `nest build`;
   una diferencia entre ambos (campos de clase sin inicializar) ya ocultó un bug una vez.
+
+
+## Escrow on-chain (fase 1, Monad testnet)
+
+Con `CHAIN_ENABLED=true` el backend deja de simular el stake: el usuario lo bloquea en el contrato
+`WillFolksEscrow` con la wallet de su teléfono y el backend actúa como **atestador** y como
+**relayer**. Con `CHAIN_ENABLED=false` (el valor por defecto) todo sigue simulado.
+
+### Flujo
+
+| Paso | Quién | Cómo |
+| --- | --- | --- |
+| Vincular wallet | App | Firma `WillFolks wallet link\nuser:<id>`; `POST /chain/wallet` verifica la firma. El login **no** puede fijar la wallet. |
+| Fondos de prueba | Backend | `POST /chain/faucet` envía USDC y gas desde la tesorería, una vez cada 24 h. |
+| Crear meta | App + backend | `POST /goals` deja un borrador con `escrowParams`; la app firma `approve` y `createGoal`; `POST /goals/:id/escrow {txHash}` verifica el recibo contra lo preparado. |
+| Controles | App → backend | Igual que antes (alarma, uso, ubicación, evidencia). |
+| Veredicto | Backend | Al terminar la meta (o al agotar intentos) firma un veredicto EIP-712 y envía `resolve`. |
+| Devolución | Backend | `claim` al terminar el bloqueo; `reclaim` si nadie resolvió dentro del plazo de gracia. |
+| Cancelar | App + backend | Antes de empezar, la wallet llama `cancel`; `POST /goals/:id/escrow/cancel {txHash}` lo confirma. |
+
+El backend nunca mueve el stake: el contrato solo lo devuelve a su creador. Lo que el backend
+puede decidir es el veredicto, y por eso `resolve` solo acepta firmas de atestadores autorizados.
+
+### Variables
+
+| Variable | Qué es |
+| --- | --- |
+| `CHAIN_ENABLED`, `CHAIN_NAME`, `CHAIN_ID`, `CHAIN_RPC_URL`, `CHAIN_EXPLORER_URL` | Red |
+| `USDC_ADDRESS`, `ESCROW_ADDRESS` | Token y contrato (ver `willfolks-smartcontracts/deployments/`) |
+| `ATTESTOR_PRIVATE_KEY` | Firma los veredictos; su dirección debe estar en el contrato |
+| `TREASURY_PRIVATE_KEY` | Paga el gas de `resolve`/`claim`/`reclaim` y entrega el faucet |
+| `FAUCET_USDC`, `FAUCET_GAS_MON`, `FAUCET_COOLDOWN_HOURS` | Faucet de prueba |
+| `CHAIN_GOAL_SECONDS` | Si es mayor que 0, las metas duran N segundos (más 2 minutos) en vez de llegar a `endDate`: para demos |
+| `CHAIN_SWEEP_MS` | Período del barrendero de liquidación |
+
+Las llaves viven solo en `.env` (ignorado por git). Son de testnet: no reutilizar en mainnet.
+
+### Pruebas
+
+```bash
+npm run test:e2e      # 29 pruebas sobre Postgres con el libro simulado
+npm run test:chain    # 13 pruebas con Anvil: despliega, firma con llaves de usuario, viaja en el tiempo
+API_URL=http://127.0.0.1:3000 node scripts/monad-smoke.mjs   # ciclo completo en la red real (≈ 6 min)
+```
+
+`test:chain` necesita `anvil` y `forge` y el repo `../willfolks-smartcontracts`.
+
+### Qué hay que saber
+
+- La hora que manda es la de la cadena: ventanas de meta y caducidad de firmas usan
+  `block.timestamp`, no el reloj del servidor.
+- Los RPC públicos balancean carga entre nodos; las escrituras reintentan y la app espera a ver
+  el `allowance` antes de llamar a `createGoal`.
+- Monad cobra el límite de gas, no el gas usado: cada usuario necesita ≈ 0,05 MON por meta.
+- Metas compartidas, propina al desarrollador y rendimiento quedan fuera hasta que el contrato
+  los soporte (`GROUP_NOT_SUPPORTED`).
+- El juez de IA sigue siendo un stub (`AI_VERIFIER_MODE=auto-approve`) y el servidor confía en lo
+  que el teléfono reporta de alarma y uso de apps. El atestador es una sola llave: es la fase 1.
