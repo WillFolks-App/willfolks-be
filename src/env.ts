@@ -35,7 +35,7 @@ export const env = {
     attestorKey: process.env.ATTESTOR_PRIVATE_KEY ?? '',
     treasuryKey: process.env.TREASURY_PRIVATE_KEY ?? '',
     faucetUsdc: Number(process.env.FAUCET_USDC ?? 3),
-    faucetGasMon: process.env.FAUCET_GAS_MON ?? '0.05',
+    faucetGasMon: process.env.FAUCET_GAS_MON ?? '0.25',
     /** Si es mayor que 0, las metas con escrow duran este tiempo en vez de llegar a `endDate` (demos y pruebas). */
     goalSeconds: Number(process.env.CHAIN_GOAL_SECONDS ?? 0),
     sweepMs: Number(process.env.CHAIN_SWEEP_MS ?? 15_000),

@@ -140,6 +140,23 @@ export class ChainService {
     return next;
   }
 
+  /**
+   * Public RPC endpoints balance load across nodes, and one that is a block behind answers
+   * `estimateGas` with a revert the next node would not give. Retrying a few times absorbs it;
+   * a revert that is real fails every attempt and is thrown after the last.
+   */
+  private async withRetry<T>(label: string, job: () => Promise<T>, attempts = 4): Promise<T> {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await job();
+      } catch (error) {
+        if (attempt >= attempts) throw error;
+        this.log.warn(`${label}: attempt ${attempt} failed, retrying`);
+        await new Promise((done) => setTimeout(done, 1_500 * attempt));
+      }
+    }
+  }
+
   // ---------------------------------------------------------------- reading
 
   async config() {
@@ -364,22 +381,26 @@ export class ChainService {
   faucet(to: string): Promise<{ usdcTx: Hex; gasTx: Hex }> {
     return this.enqueue(async () => {
       const address = getAddress(to);
-      const gasTx = await this.wallet.sendTransaction({
-        account: this.treasury,
-        chain: this.chain,
-        to: address,
-        value: parseEther(env.chain.faucetGasMon),
-      });
-      const usdcTx = await this.wallet.writeContract({
-        account: this.treasury,
-        chain: this.chain,
-        address: env.chain.usdc as Address,
-        abi: ERC20_ABI,
-        functionName: 'transfer',
-        args: [address, toUnits(env.chain.faucetUsdc)],
-      });
-      await this.client.waitForTransactionReceipt({ hash: usdcTx, timeout: 45_000 });
+      const gasTx = await this.withRetry('faucet gas', () =>
+        this.wallet.sendTransaction({
+          account: this.treasury,
+          chain: this.chain,
+          to: address,
+          value: parseEther(env.chain.faucetGasMon),
+        }),
+      );
       await this.client.waitForTransactionReceipt({ hash: gasTx, timeout: 45_000 });
+      const usdcTx = await this.withRetry('faucet usdc', () =>
+        this.wallet.writeContract({
+          account: this.treasury,
+          chain: this.chain,
+          address: env.chain.usdc as Address,
+          abi: ERC20_ABI,
+          functionName: 'transfer',
+          args: [address, toUnits(env.chain.faucetUsdc)],
+        }),
+      );
+      await this.client.waitForTransactionReceipt({ hash: usdcTx, timeout: 45_000 });
       return { usdcTx, gasTx };
     });
   }
@@ -409,14 +430,16 @@ export class ChainService {
         primaryType: 'Resolution',
         message: { goalId: escrowGoalId, success, evidenceHash, validUntil },
       });
-      const hash = await this.wallet.writeContract({
-        account: this.treasury,
-        chain: this.chain,
-        address: env.chain.escrow as Address,
-        abi: ESCROW_ABI,
-        functionName: 'resolve',
-        args: [escrowGoalId, success, evidenceHash, validUntil, attestor.address, signature],
-      });
+      const hash = await this.withRetry('resolve', () =>
+        this.wallet.writeContract({
+          account: this.treasury,
+          chain: this.chain,
+          address: env.chain.escrow as Address,
+          abi: ESCROW_ABI,
+          functionName: 'resolve',
+          args: [escrowGoalId, success, evidenceHash, validUntil, attestor.address, signature],
+        }),
+      );
       const receipt = await this.client.waitForTransactionReceipt({ hash, timeout: 45_000 });
       if (receipt.status !== 'success') throw new Error(`resolve reverted: ${hash}`);
       this.log.log(`resolved escrow goal ${escrowGoalId} success=${success} tx=${hash}`);
@@ -426,14 +449,16 @@ export class ChainService {
 
   claim(escrowGoalId: bigint, fn: 'claim' | 'reclaim' = 'claim') {
     return this.enqueue(async () => {
-      const hash = await this.wallet.writeContract({
-        account: this.treasury,
-        chain: this.chain,
-        address: env.chain.escrow as Address,
-        abi: ESCROW_ABI,
-        functionName: fn,
-        args: [escrowGoalId],
-      });
+      const hash = await this.withRetry(fn, () =>
+        this.wallet.writeContract({
+          account: this.treasury,
+          chain: this.chain,
+          address: env.chain.escrow as Address,
+          abi: ESCROW_ABI,
+          functionName: fn,
+          args: [escrowGoalId],
+        }),
+      );
       const receipt = await this.client.waitForTransactionReceipt({ hash, timeout: 45_000 });
       if (receipt.status !== 'success') throw new Error(`${fn} reverted: ${hash}`);
       this.log.log(`${fn} escrow goal ${escrowGoalId} tx=${hash}`);
