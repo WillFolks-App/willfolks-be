@@ -57,7 +57,8 @@ export class AuthController {
       const existing = await manager.findOneBy(User, { email: dto.email });
       if (existing) {
         // The device wallet is the account wallet: a reinstall brings a new one.
-        if (dto.walletAddress && dto.walletAddress !== existing.walletAddress) {
+        // With the on-chain escrow a wallet is linked only by signing (POST /chain/wallet).
+        if (!env.chain.enabled && dto.walletAddress && dto.walletAddress !== existing.walletAddress) {
           existing.walletAddress = dto.walletAddress;
           await manager.save(existing);
         }
@@ -69,7 +70,7 @@ export class AuthController {
         displayName: dto.displayName ?? dto.email.split('@')[0].slice(0, 60),
         authProvider: 'dev',
         providerSubject: dto.email.toLowerCase(),
-        walletAddress: dto.walletAddress ?? null,
+        walletAddress: env.chain.enabled ? null : (dto.walletAddress ?? null),
         timezone: dto.timezone,
         locale: dto.locale,
       });
