@@ -3,6 +3,7 @@ import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { IsIn, IsNumber, IsOptional, IsString, Max, MaxLength, Min } from 'class-validator';
 
 import { UserId } from '../common/auth.js';
+import { QrPurchaseService } from './qr-purchase.service.js';
 import { WalletService } from './wallet.service.js';
 
 class DepositDto {
@@ -27,11 +28,27 @@ class WithdrawDto {
   note?: string;
 }
 
+class QrPurchaseDto {
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0.01)
+  @Max(10000)
+  usdc: number;
+}
+
+class QrConfirmDto {
+  @IsString()
+  @MaxLength(1000)
+  ticket: string;
+}
+
 @ApiTags('wallet')
 @ApiBearerAuth()
 @Controller('wallet')
 export class WalletController {
-  constructor(private readonly wallet: WalletService) {}
+  constructor(
+    private readonly wallet: WalletService,
+    private readonly qr: QrPurchaseService,
+  ) {}
 
   @Get()
   balance(@UserId() userId: string) {
@@ -53,6 +70,24 @@ export class WalletController {
   @Post('deposits')
   deposit(@UserId() userId: string, @Body() dto: DepositDto) {
     return this.wallet.deposit(userId, dto.amount, dto.method);
+  }
+
+  /** Terms of buying USDC with a Bolivian bank QR: rate, limits, validity. */
+  @Get('qr-purchases/config')
+  qrConfig() {
+    return this.qr.config();
+  }
+
+  /** Issues the bank QR (through TilcAI) for `usdc` at the current rate. */
+  @Post('qr-purchases')
+  qrPurchase(@UserId() userId: string, @Body() dto: QrPurchaseDto) {
+    return this.qr.create(userId, dto.usdc);
+  }
+
+  /** Pending until the bank pays the QR; then the USDC is sent and the deposit recorded, once. */
+  @Post('qr-purchases/confirm')
+  qrConfirm(@UserId() userId: string, @Body() dto: QrConfirmDto) {
+    return this.qr.confirm(userId, dto.ticket);
   }
 
   @Post('withdrawals')

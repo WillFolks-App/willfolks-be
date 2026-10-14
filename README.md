@@ -157,6 +157,19 @@ enciende sola cuando tiene su credencial y se apaga con su variable (ver `.env.e
 | **Juez de IA por x402** | Con `TILCAI_AI_JUDGE=true`, `POST /judge/verify` queda detrás de un `Paywall` (0.01 USDC en Monad, liquidado por el facilitador de TilcAI) y el backend compra cada veredicto desde la tesorería con `x402Fetch`. El modelo sigue siendo un stub; lo que sí es real es el cobro. Si el juez no responde, la prueba queda pendiente (nunca se pierde un stake por un pago fallido). | La tesorería firma la autorización EIP-3009 del pago. |
 | **Cuenta inteligente** | `POST /chain/account` emite una SCA en Monad con la passkey P-256 que la app genera y guarda en el teléfono (`sdk.accounts`); `GET /chain/account` la consulta. TilcAI es el registro (por `externalRef` = id de usuario): no hay tabla nueva. | La passkey del teléfono. TilcAI paga el despliegue y nunca es firmante. |
 
+### Compra de USDC con QR boliviano
+
+TilcAI emite el QR Simple por la API de Vendis ("QR Dinámico para Pagos" v1.3: `login`, `generate`, `get`), que el
+backend usa con `TILCAI_QR_EMAIL` y `TILCAI_QR_PASSWORD` (`TILCAI_QR_URL` por defecto es `TILCAI_API_URL` + `/mock/vendis`).
+
+| Endpoint | Qué hace |
+| --- | --- |
+| `GET /wallet/qr-purchases/config` | Tipo de cambio (`QR_BOB_PER_USD`, 11.89), mínimo y máximo en USDC, minutos de validez. |
+| `POST /wallet/qr-purchases` `{ usdc }` | Pide el QR por `usdc × 11.89` Bs. Devuelve el PNG de TilcAI, su contenido leído y recodificado en nivel H (`modules`, para que la app lo dibuje con su estilo y su insignia al centro) y un `ticket` firmado con la compra. |
+| `POST /wallet/qr-purchases/confirm` `{ ticket }` | Consulta el estado del QR. Cuando el banco lo pagó por el monto completo, paga el USDC a la wallet (vault de TilcAI con `reference` = `wf-qr-<id>`, o la tesorería) y registra el depósito con nota `QR <id>`. Un lock por QR evita pagar dos veces. |
+
+No hay tabla nueva: el ticket lleva usuario, monto y vencimiento, y la nota del depósito marca el QR ya acreditado.
+
 `GET /tilcai/status` (público) dice qué capacidades están activas y si TilcAI responde. Un error de TilcAI llega
 a la app con su código (`TILCAI_VAULT_BUDGET`, `TILCAI_RELAY_RELAYED_TX_FAILED`…).
 

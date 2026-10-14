@@ -29,6 +29,7 @@ import { PetController } from './pet/pet.controller.js';
 import { PetService } from './pet/pet.service.js';
 import { UsageController } from './usage/usage.controller.js';
 import { UsersController } from './users/users.controller.js';
+import { QrPurchaseService } from './wallet/qr-purchase.service.js';
 import { WalletController } from './wallet/wallet.controller.js';
 import { WalletService } from './wallet/wallet.service.js';
 
@@ -67,6 +68,7 @@ import { WalletService } from './wallet/wallet.service.js';
   providers: [
     GoalsService,
     WalletService,
+    QrPurchaseService,
     ChainService,
     ChainSettlementService,
     ChainSweeper,

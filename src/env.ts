@@ -82,6 +82,23 @@ export const env = {
     ),
     /** `resolve`, `claim` y `reclaim` los envía el relayer de TilcAI; el veredicto lo firma este backend. */
     relayValidation: flag(process.env.TILCAI_RELAY_VALIDATION, tilcaiEnabled && tilcaiRelayerReady),
+    /**
+     * Compra de USDC con QR boliviano: TilcAI emite el QR por la API de Vendis ("QR Dinámico
+     * para Pagos" v1.3) y, cuando el banco lo cobra, el backend paga el USDC a la billetera.
+     */
+    qr: {
+      /** Base de la API de cobro. Sin definir, la que TilcAI expone junto a su API. */
+      url: (process.env.TILCAI_QR_URL || (process.env.TILCAI_API_URL ? `${process.env.TILCAI_API_URL.replace(/\/$/, '')}/mock/vendis` : '')).replace(/\/$/, ''),
+      email: process.env.TILCAI_QR_EMAIL ?? '',
+      password: process.env.TILCAI_QR_PASSWORD ?? '',
+      /** Dispositivo que figura en la glosa del QR. */
+      deviceId: process.env.TILCAI_QR_DEVICE_ID ?? 'willfolks',
+      /** Bolivianos por dólar con que se cotiza la compra. */
+      bobPerUsd: Number(process.env.QR_BOB_PER_USD ?? 11.89),
+      minUsdc: Number(process.env.QR_MIN_USDC ?? 1),
+      maxUsdc: Number(process.env.QR_MAX_USDC ?? 10),
+      expiresMinutes: Number(process.env.QR_EXPIRES_MINUTES ?? 15),
+    },
     /** El juez de IA se cobra por x402 en USDC de Monad. */
     judge: {
       enabled: flag(process.env.TILCAI_AI_JUDGE, false) && tilcaiEnabled && tilcaiRelayerReady,
