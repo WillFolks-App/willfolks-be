@@ -22,7 +22,7 @@ import { Brackets, DataSource, Repository } from 'typeorm';
 import { UserId } from '../common/auth.js';
 import { defined } from '../common/db.js';
 import { privateUser, publicUser } from '../common/serialize.js';
-import { imageUpload } from '../common/uploads.js';
+import { imageUpload, uploadedPath } from '../common/uploads.js';
 import { Friendship, THEMES, type ThemeId, User, UserSettings } from '../entities/index.js';
 
 class UpdateMeDto {
@@ -116,7 +116,7 @@ export class UsersController {
   @UseInterceptors(FileInterceptor('photo', imageUpload('avatars')))
   async uploadAvatar(@UserId() userId: string, @UploadedFile() file?: Express.Multer.File) {
     if (!file) throw new BadRequestException('A "photo" image file is required');
-    await this.users.update({ id: userId }, { avatarUrl: `/uploads/avatars/${file.filename}` });
+    await this.users.update({ id: userId }, { avatarUrl: uploadedPath('avatars', file) });
     return privateUser(await this.users.findOneByOrFail({ id: userId }));
   }
 

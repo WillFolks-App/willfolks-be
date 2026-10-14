@@ -2,6 +2,7 @@ import { BadRequestException, Injectable, Logger, ServiceUnavailableException } 
 import {
   type Address,
   type Hex,
+  encodeFunctionData,
   type PublicClient,
   type WalletClient,
   createPublicClient,
@@ -21,6 +22,7 @@ import {
 import { privateKeyToAccount } from 'viem/accounts';
 
 import { env } from '../env.js';
+import { TilcaiService } from '../tilcai/tilcai.service.js';
 
 const USDC_UNITS = 1_000_000;
 
@@ -85,6 +87,8 @@ export class ChainService {
   private publicClient?: PublicClient;
   private relayer?: WalletClient;
   private queue: Promise<unknown> = Promise.resolve();
+
+  constructor(private readonly tilcai: TilcaiService) {}
 
   get enabled(): boolean {
     return env.chain.enabled;
@@ -177,6 +181,7 @@ export class ChainService {
       maxStake: fromUnits(maxStake),
       resolutionGraceSeconds: Number(grace),
       faucet: { usdc: env.chain.faucetUsdc, gasMon: env.chain.faucetGasMon },
+      fiatDepositUsdc: env.chain.fiatDepositUsdc,
       demoGoalSeconds: env.chain.goalSeconds,
     };
   }
@@ -390,19 +395,39 @@ export class ChainService {
         }),
       );
       await this.client.waitForTransactionReceipt({ hash: gasTx, timeout: 45_000 });
-      const usdcTx = await this.withRetry('faucet usdc', () =>
-        this.wallet.writeContract({
-          account: this.treasury,
-          chain: this.chain,
-          address: env.chain.usdc as Address,
-          abi: ERC20_ABI,
-          functionName: 'transfer',
-          args: [address, toUnits(env.chain.faucetUsdc)],
-        }),
-      );
-      await this.client.waitForTransactionReceipt({ hash: usdcTx, timeout: 45_000 });
-      return { usdcTx, gasTx };
+      const reference = `wf-faucet-${address.toLowerCase()}-${Date.now()}`;
+      return { usdcTx: await this.payUsdcNow(address, env.chain.faucetUsdc, reference, this.tilcai.vaultFaucet), gasTx };
     });
+  }
+
+  /**
+   * Pays USDC to `to`: from TilcAI's vault when it is on, and from the treasury when the vault is
+   * off or refuses (its budget spent, the service down), so a vault outage does not stop the app.
+   */
+  payUsdc(to: string, amountUsdc: number, reference: string): Promise<Hex> {
+    return this.enqueue(() => this.payUsdcNow(getAddress(to), amountUsdc, reference, this.tilcai.vaultDeposits));
+  }
+
+  private async payUsdcNow(address: Address, amountUsdc: number, reference: string, viaVault: boolean): Promise<Hex> {
+    if (viaVault) {
+      try {
+        return (await this.tilcai.disburse(address, amountUsdc, reference)).txHash;
+      } catch (error) {
+        this.log.warn(`vault payment failed, paying from the treasury: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    const hash = await this.withRetry('pay usdc', () =>
+      this.wallet.writeContract({
+        account: this.treasury,
+        chain: this.chain,
+        address: env.chain.usdc as Address,
+        abi: ERC20_ABI,
+        functionName: 'transfer',
+        args: [address, toUnits(amountUsdc)],
+      }),
+    );
+    await this.client.waitForTransactionReceipt({ hash, timeout: 45_000 });
+    return hash;
   }
 
   /** Signs the verdict as the attestor and submits it from the relayer. */
@@ -430,16 +455,20 @@ export class ChainService {
         primaryType: 'Resolution',
         message: { goalId: escrowGoalId, success, evidenceHash, validUntil },
       });
-      const hash = await this.withRetry('resolve', () =>
-        this.wallet.writeContract({
-          account: this.treasury,
-          chain: this.chain,
-          address: env.chain.escrow as Address,
-          abi: ESCROW_ABI,
-          functionName: 'resolve',
-          args: [escrowGoalId, success, evidenceHash, validUntil, attestor.address, signature],
-        }),
-      );
+      const args = [escrowGoalId, success, evidenceHash, validUntil, attestor.address, signature] as const;
+      // The verdict is signed here, by the attestor key; who sends the transaction does not matter to the contract.
+      const hash = this.tilcai.relayValidation
+        ? await this.relayCall('resolve', encodeFunctionData({ abi: ESCROW_ABI, functionName: 'resolve', args }))
+        : await this.withRetry('resolve', () =>
+            this.wallet.writeContract({
+              account: this.treasury,
+              chain: this.chain,
+              address: env.chain.escrow as Address,
+              abi: ESCROW_ABI,
+              functionName: 'resolve',
+              args,
+            }),
+          );
       const receipt = await this.client.waitForTransactionReceipt({ hash, timeout: 45_000 });
       if (receipt.status !== 'success') throw new Error(`resolve reverted: ${hash}`);
       this.log.log(`resolved escrow goal ${escrowGoalId} success=${success} tx=${hash}`);
@@ -449,21 +478,31 @@ export class ChainService {
 
   claim(escrowGoalId: bigint, fn: 'claim' | 'reclaim' = 'claim') {
     return this.enqueue(async () => {
-      const hash = await this.withRetry(fn, () =>
-        this.wallet.writeContract({
-          account: this.treasury,
-          chain: this.chain,
-          address: env.chain.escrow as Address,
-          abi: ESCROW_ABI,
-          functionName: fn,
-          args: [escrowGoalId],
-        }),
-      );
+      const hash = this.tilcai.relayValidation
+        ? await this.relayCall(fn, encodeFunctionData({ abi: ESCROW_ABI, functionName: fn, args: [escrowGoalId] }))
+        : await this.withRetry(fn, () =>
+            this.wallet.writeContract({
+              account: this.treasury,
+              chain: this.chain,
+              address: env.chain.escrow as Address,
+              abi: ESCROW_ABI,
+              functionName: fn,
+              args: [escrowGoalId],
+            }),
+          );
       const receipt = await this.client.waitForTransactionReceipt({ hash, timeout: 45_000 });
       if (receipt.status !== 'success') throw new Error(`${fn} reverted: ${hash}`);
       this.log.log(`${fn} escrow goal ${escrowGoalId} tx=${hash}`);
       return { txHash: hash };
     });
+  }
+
+  /** Sends a call to the escrow from TilcAI's relayer (tilcai-sdk) and returns its confirmed hash. */
+  private async relayCall(label: string, data: Hex): Promise<Hex> {
+    // No blind retry: a timed-out relay may still land, and the settlement pass reads the chain before it resends.
+    const tx = await this.tilcai.relay(env.chain.escrow, data);
+    this.log.log(`${label} relayed by TilcAI (${env.tilcai.relayerId}) tx=${tx.hash}`);
+    return tx.hash;
   }
 
   explorerTx(hash: string): string {

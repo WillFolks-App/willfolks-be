@@ -143,3 +143,34 @@ API_URL=http://127.0.0.1:3000 node scripts/monad-smoke.mjs   # ciclo completo en
   los soporte (`GROUP_NOT_SUPPORTED`).
 - El juez de IA sigue siendo un stub (`AI_VERIFIER_MODE=auto-approve`) y el servidor confía en lo
   que el teléfono reporta de alarma y uso de apps. El atestador es una sola llave: es la fase 1.
+
+## TilcAI (tilcai-sdk)
+
+Con `TILCAI_ENABLED=true` el backend usa [`tilcai-sdk`](https://www.npmjs.com/package/tilcai-sdk) ([código](https://github.com/TilcAI/tilcai-sdk)) para cuatro cosas. Cada una se
+enciende sola cuando tiene su credencial y se apaga con su variable (ver `.env.example`); con
+`TILCAI_ENABLED=false` nada de esto corre y el backend se comporta como antes.
+
+| Capacidad | Qué cambia | Quién firma |
+| --- | --- | --- |
+| **Faucet y depósitos fiat** | El USDC sale del vault de TilcAI en Monad (`sdk.vault.disburse`), no de la tesorería. El depósito fiat sigue simulando el cobro por QR, pero el USDC que llega a la wallet es real y trae su `txHash`. | El relayer de TilcAI envía `disburse`; el contrato limita topes y paga cada `reference` una vez. |
+| **Validación del escrow** | `resolve`, `claim` y `reclaim` los envía el relayer de TilcAI (`EvmRelayer`), que paga el gas. | El veredicto EIP-712 lo sigue firmando **este backend** con `ATTESTOR_PRIVATE_KEY`; el contrato solo acepta atestadores autorizados, así que quién envía la transacción no importa. |
+| **Juez de IA por x402** | Con `TILCAI_AI_JUDGE=true`, `POST /judge/verify` queda detrás de un `Paywall` (0.01 USDC en Monad, liquidado por el facilitador de TilcAI) y el backend compra cada veredicto desde la tesorería con `x402Fetch`. El modelo sigue siendo un stub; lo que sí es real es el cobro. Si el juez no responde, la prueba queda pendiente (nunca se pierde un stake por un pago fallido). | La tesorería firma la autorización EIP-3009 del pago. |
+| **Cuenta inteligente** | `POST /chain/account` emite una SCA en Monad con la passkey P-256 que la app genera y guarda en el teléfono (`sdk.accounts`); `GET /chain/account` la consulta. TilcAI es el registro (por `externalRef` = id de usuario): no hay tabla nueva. | La passkey del teléfono. TilcAI paga el despliegue y nunca es firmante. |
+
+`GET /tilcai/status` (público) dice qué capacidades están activas y si TilcAI responde. Un error de TilcAI llega
+a la app con su código (`TILCAI_VAULT_BUDGET`, `TILCAI_RELAY_RELAYED_TX_FAILED`…).
+
+### Instalación del SDK
+
+`tilcai-sdk` se instala desde npm (`"tilcai-sdk": "^0.1.0"`; el código importa `tilcai-sdk` y `tilcai-sdk/x402`). Sus
+pares opcionales (`viem`, `@stellar/stellar-sdk`) solo se cargan si se usan; el backend ya depende de `viem`. Requiere Node.js ≥ 20.
+
+### Pruebas
+
+```bash
+npm run test:e2e                  # incluye test/tilcai.e2e-spec.ts (relayer, vault y banderas con servidores simulados)
+API_URL=http://127.0.0.1:3000 node scripts/tilcai-smoke.mjs   # ciclo real en Monad (≈ 6 min): faucet, depósito, SCA, juez x402, resolve por el relayer
+```
+
+El e2e desde la app de Android (Maestro) vive en `../willfolks-expo-app/e2e/onchain-tilcai.yaml`.
+

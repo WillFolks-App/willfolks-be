@@ -6,6 +6,7 @@ import { ChainService } from '../chain/chain.service.js';
 import { TxMethod, TxType, User, WalletTransaction } from '../entities/index.js';
 import { env } from '../env.js';
 import { NotificationsService } from '../notifications/notifications.service.js';
+import { TilcaiService } from '../tilcai/tilcai.service.js';
 
 export interface Balance {
   available: number;
@@ -31,6 +32,7 @@ export class WalletService {
     private readonly dataSource: DataSource,
     private readonly notifications: NotificationsService,
     private readonly chain: ChainService,
+    private readonly tilcai: TilcaiService,
   ) {}
 
   async balance(userId: string, manager: EntityManager = this.dataSource.manager): Promise<Balance> {
@@ -78,7 +80,8 @@ export class WalletService {
 
   async record(manager: EntityManager, input: RecordInput): Promise<WalletTransaction> {
     const user = await manager.findOneOrFail(User, { where: { id: input.userId }, select: { id: true, chain: true } });
-    const onChain = input.method !== 'fiat';
+    // A fiat deposit paid out by TilcAI's vault carries a real hash, so it is a chain movement too.
+    const onChain = input.method !== 'fiat' || Boolean(input.txHash);
     const { identifiers } = await manager.insert(WalletTransaction, {
       userId: input.userId,
       goalId: input.goalId ?? null,
@@ -94,9 +97,24 @@ export class WalletService {
     return manager.findOneByOrFail(WalletTransaction, { id: identifiers[0].id as string });
   }
 
-  deposit(userId: string, amount: number, method: 'crypto' | 'fiat'): Promise<WalletTransaction> {
+  /**
+   * Fiat deposit: the payment processor is still simulated (no money moves in a bank), but with
+   * TilcAI configured the USDC the user receives is real: TilcAI's vault pays it to their wallet
+   * on Monad, the way a confirmed QR payment would trigger it.
+   */
+  async deposit(userId: string, amount: number, method: 'crypto' | 'fiat'): Promise<WalletTransaction> {
+    let txHash: string | undefined;
+    let note: string | undefined;
+    if (method === 'fiat' && env.chain.enabled && this.tilcai.vaultDeposits) {
+      const user = await this.dataSource.manager.findOneOrFail(User, { where: { id: userId }, select: { id: true, walletAddress: true } });
+      if (!user.walletAddress) {
+        throw new BadRequestException({ code: 'WALLET_REQUIRED', message: 'Link a wallet before depositing' });
+      }
+      txHash = await this.chain.payUsdc(user.walletAddress, amount, `wf-deposit-${userId}-${Date.now()}`);
+      note = 'QR deposit';
+    }
     return this.dataSource.transaction(async (manager) => {
-      const tx = await this.record(manager, { userId, type: 'deposit', amount, method });
+      const tx = await this.record(manager, { userId, type: 'deposit', amount, method, ...(txHash ? { txHash, note } : {}) });
       await this.notifications.push(manager, userId, 'wallet', 'deposit', { amount, reference: tx.referenceCode }, { transactionId: tx.id });
       return tx;
     });

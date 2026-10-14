@@ -7,7 +7,7 @@ import { WalletService } from './wallet.service.js';
 
 class DepositDto {
   @IsNumber({ maxDecimalPlaces: 6 })
-  @Min(1)
+  @Min(0.01)
   @Max(10000)
   amount: number;
 

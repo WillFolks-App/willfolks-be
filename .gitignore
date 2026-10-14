@@ -4,3 +4,6 @@ dist/
 uploads/*
 !uploads/.gitkeep
 *.tsbuildinfo
+.vercel
+.env*
+!.env.example

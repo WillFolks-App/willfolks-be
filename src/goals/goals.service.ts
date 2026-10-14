@@ -3,6 +3,7 @@ import {
   ConflictException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
   UnprocessableEntityException,
 } from '@nestjs/common';
@@ -11,6 +12,7 @@ import { DataSource, EntityManager, In } from 'typeorm';
 import { ChainSettlementService } from '../chain/chain-settlement.service.js';
 import { ChainService, type EscrowParams } from '../chain/chain.service.js';
 import { defined, round6 } from '../common/db.js';
+import { uploadedPath } from '../common/uploads.js';
 import { mediaUrl, publicUser } from '../common/serialize.js';
 import {
   type CheckinResult,
@@ -28,6 +30,7 @@ import {
   WalletTransaction,
 } from '../entities/index.js';
 import { env } from '../env.js';
+import { JudgeService } from '../judge/judge.service.js';
 import { NotificationsService } from '../notifications/notifications.service.js';
 import { PetService } from '../pet/pet.service.js';
 import { WalletService } from '../wallet/wallet.service.js';
@@ -64,6 +67,8 @@ function distanceMeters(lat1: number, lng1: number, lat2: number, lng2: number):
 
 @Injectable()
 export class GoalsService {
+  private readonly logger = new Logger(GoalsService.name);
+
   constructor(
     private readonly dataSource: DataSource,
     private readonly wallet: WalletService,
@@ -71,6 +76,7 @@ export class GoalsService {
     private readonly pets: PetService,
     private readonly chain: ChainService,
     private readonly settlement: ChainSettlementService,
+    private readonly aiJudge: JudgeService,
   ) {}
 
   // ---------------------------------------------------------------- reading
@@ -451,14 +457,14 @@ export class GoalsService {
         goalId,
         userId,
         checkinId: checkin.id,
-        mediaUrl: `/uploads/proofs/${file.filename}`,
+        mediaUrl: uploadedPath('proofs', file),
         note: dto.note ?? null,
         verifier,
         reviewerId: verifier === 'friend' ? goal.ai.verifierUserId : null,
       });
       const proof = await manager.findOneByOrFail(Proof, { id: identifiers[0].id as string });
 
-      if (verifier === 'ai' && env.aiVerifierMode === 'auto-approve') {
+      if (verifier === 'ai' && env.aiVerifierMode === 'auto-approve' && !this.aiJudge.enabled) {
         // Stand-in for the Gemini judge: any proof with a photo passes.
         await this.resolveProof(manager, goal, proof, true, 'Auto-approved: AI verification is simulated in this build.');
       } else if (proof.reviewerId) {
@@ -474,12 +480,43 @@ export class GoalsService {
       }
       return proof.id;
     });
+    // Paying the judge settles USDC on the chain (seconds): it happens outside the transaction above.
+    await this.askPaidJudge(proofId, file);
     this.settlement.kick();
 
     return {
       proof: this.proofView(await this.dataSource.manager.findOneByOrFail(Proof, { id: proofId })),
       goal: await this.get(userId, goalId),
     };
+  }
+
+  /**
+   * With the paid judge on, an AI proof is verified by buying a verdict over x402 and applying it.
+   * If the judge cannot be reached or paid, the proof stays pending (the user can send another):
+   * a failed payment must never turn into a lost stake.
+   */
+  private async askPaidJudge(proofId: string, file: Express.Multer.File): Promise<void> {
+    if (!this.aiJudge.enabled || env.aiVerifierMode !== 'auto-approve') return;
+    const proof = await this.dataSource.manager.findOneByOrFail(Proof, { id: proofId });
+    if (proof.verifier !== 'ai' || proof.status !== 'pending') return;
+    const goal = await this.dataSource.manager.findOneOrFail(Goal, { where: { id: proof.goalId }, relations: GOAL_RELATIONS });
+    const base = env.publicUrl || `http://127.0.0.1:${env.port}`;
+    try {
+      const verdict = await this.aiJudge.buy({
+        title: goal.title,
+        prompt: goal.ai?.prompt ?? '',
+        photoUrl: uploadedPath('proofs', file).startsWith('/') ? `${base}${uploadedPath('proofs', file)}` : uploadedPath('proofs', file),
+      });
+      const reason = `${verdict.reason} Paid with x402 · tx ${verdict.payment.transaction}`.slice(0, 480);
+      await this.dataSource.transaction(async (manager) => {
+        const fresh = await manager.findOneByOrFail(Proof, { id: proofId });
+        if (fresh.status !== 'pending') return;
+        const current = await manager.findOneOrFail(Goal, { where: { id: fresh.goalId }, relations: GOAL_RELATIONS });
+        await this.resolveProof(manager, current, fresh, verdict.approved, reason);
+      });
+    } catch (error) {
+      this.logger.warn(`AI judge unavailable for proof ${proofId}: ${String(error)}`);
+    }
   }
 
   async reviewProof(userId: string, proofId: string, dto: ReviewProofDto) {
